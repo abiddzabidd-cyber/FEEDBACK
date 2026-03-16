@@ -1,13 +1,14 @@
 {
   "name": "feedback-bot",
   "version": "1.0.0",
-  "description": "Bot Discord Feedback Only",
+  "description": "Discord feedback bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "^14.14.1",
-    "dotenv": "^16.4.5"
+    "discord.js": "^14.15.0",
+    "dotenv": "^16.3.1",
+    "fs": "^0.0.1-security"
   }
 }
