@@ -3,7 +3,6 @@ const { Client, GatewayIntentBits, SlashCommandBuilder, ActionRowBuilder, Button
 const fs = require("fs");
 require("dotenv").config();
 
-// Inisialisasi client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -18,23 +17,27 @@ if(fs.existsSync("admin.json")){
   adminData = JSON.parse(fs.readFileSync("admin.json"));
 }
 
-// Cek staff (owner + admin/helper)
-function isStaff(userId) {
+// Cek staff
+function isStaff(userId){
   return userId === process.env.OWNER_ID || adminData.admins.includes(userId);
 }
 
 client.once("ready", async () => {
   console.log(`Bot online sebagai ${client.user.tag}`);
 
-  // Slash command
+  // Buat slash command
   const feedbackCommand = new SlashCommandBuilder()
     .setName("feedback")
     .setDescription("Kirim saran atau feedback")
-    .addStringOption(option => 
+    .addStringOption(option =>
       option.setName("saran")
         .setDescription("Isi feedback kamu")
         .setRequired(true)
     );
+
+  const listCommand = new SlashCommandBuilder()
+    .setName("listfeedback")
+    .setDescription("Staff bisa liat feedback pending");
 
   const addAdminCommand = new SlashCommandBuilder()
     .setName("addadmin")
@@ -54,18 +57,15 @@ client.once("ready", async () => {
         .setRequired(true)
     );
 
-  await client.application.commands.set([feedbackCommand, addAdminCommand, removeAdminCommand]);
+  await client.application.commands.set([feedbackCommand, listCommand, addAdminCommand, removeAdminCommand]);
   console.log("Slash command berhasil dibuat");
 });
 
-// Handle slash command
 client.on("interactionCreate", async interaction => {
-  if(interaction.type !== InteractionType.ApplicationCommand) return;
-
   const userId = interaction.user.id;
   const feedbackChannel = await client.channels.fetch(process.env.FEEDBACK_CHANNEL_ID);
 
-  // Feedback
+  // FEEDBACK COMMAND
   if(interaction.commandName === "feedback"){
     const saran = interaction.options.getString("saran");
 
@@ -74,27 +74,32 @@ client.on("interactionCreate", async interaction => {
       .setTitle("📩 Feedback Baru")
       .setDescription(`**Dari:** ${interaction.user.tag}\n**Saran:** ${saran}\n**Status:** Pending`);
 
-    const approveBtn = new ButtonBuilder()
-      .setCustomId("approve")
-      .setLabel("Approve")
-      .setStyle(ButtonStyle.Success);
-
-    const rejectBtn = new ButtonBuilder()
-      .setCustomId("reject")
-      .setLabel("Reject")
-      .setStyle(ButtonStyle.Danger);
-
-    const row = new ActionRowBuilder().addComponents(approveBtn, rejectBtn);
-
-    await feedbackChannel.send({
-      embeds: [feedbackEmbed],
-      components: isStaff(userId) ? [row] : []
-    });
-
+    await feedbackChannel.send({ embeds: [feedbackEmbed] });
     await interaction.reply({ content: "✅ Feedback terkirim!", ephemeral: true });
   }
 
-  // Add admin
+  // LIST FEEDBACK
+  if(interaction.commandName === "listfeedback"){
+    if(!isStaff(userId)) return interaction.reply({ content: "❌ Kamu bukan staff", ephemeral: true });
+
+    const messages = await feedbackChannel.messages.fetch({ limit: 50 });
+    const pendingMessages = messages.filter(msg => msg.embeds[0]?.data.color === 16776960); // kuning
+
+    if(pendingMessages.size === 0) return interaction.reply({ content: "⚠️ Tidak ada feedback pending", ephemeral: true });
+
+    for(const [id, msg] of pendingMessages){
+      const embed = msg.embeds[0];
+      const approveBtn = new ButtonBuilder().setCustomId(`approve_${msg.id}`).setLabel("Approve").setStyle(ButtonStyle.Success);
+      const rejectBtn = new ButtonBuilder().setCustomId(`reject_${msg.id}`).setLabel("Reject").setStyle(ButtonStyle.Danger);
+      const row = new ActionRowBuilder().addComponents(approveBtn, rejectBtn);
+
+      await interaction.user.send({ embeds: [embed], components: [row] }).catch(()=>{});
+    }
+
+    await interaction.reply({ content: "📬 Semua feedback pending telah dikirim ke DM kamu!", ephemeral: true });
+  }
+
+  // ADD ADMIN
   if(interaction.commandName === "addadmin"){
     if(userId !== process.env.OWNER_ID) return interaction.reply({ content: "❌ Hanya owner yg bisa add admin", ephemeral: true });
 
@@ -108,7 +113,7 @@ client.on("interactionCreate", async interaction => {
     }
   }
 
-  // Remove admin
+  // REMOVE ADMIN
   if(interaction.commandName === "removeadmin"){
     if(userId !== process.env.OWNER_ID) return interaction.reply({ content: "❌ Hanya owner yg bisa remove admin", ephemeral: true });
 
@@ -119,7 +124,7 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
-// Tombol approve/reject
+// BUTTON APPROVE/REJECT
 client.on("interactionCreate", async interaction => {
   if(!interaction.isButton()) return;
 
@@ -130,24 +135,25 @@ client.on("interactionCreate", async interaction => {
   const embed = EmbedBuilder.from(msg.embeds[0]);
   const memberTag = embed.data.description.split("\n")[0].replace("**Dari:** ", "");
 
-  if(interaction.customId === "approve"){
+  if(interaction.customId.startsWith("approve")){
     embed.setColor("Green");
     embed.setFooter({ text: "Disetujui ✅" });
     await msg.edit({ embeds: [embed], components: [] });
     await interaction.reply({ content: "✅ Feedback disetujui", ephemeral: true });
-    const member = await client.users.fetch(memberTag.replace(/<@!?(\d+)>/, "$1")).catch(()=>null);
+
+    const member = await client.users.fetch(memberTag.split("#")[0]).catch(()=>null);
     if(member) member.send("✅ Feedback kamu telah disetujui oleh staff!");
   }
 
-  if(interaction.customId === "reject"){
+  if(interaction.customId.startsWith("reject")){
     embed.setColor("Red");
     embed.setFooter({ text: "Ditolak ❌" });
     await msg.edit({ embeds: [embed], components: [] });
     await interaction.reply({ content: "❌ Feedback ditolak", ephemeral: true });
-    const member = await client.users.fetch(memberTag.replace(/<@!?(\d+)>/, "$1")).catch(()=>null);
+
+    const member = await client.users.fetch(memberTag.split("#")[0]).catch(()=>null);
     if(member) member.send("❌ Feedback kamu telah ditolak oleh staff!");
   }
 });
 
-// Login
 client.login(process.env.TOKEN);
