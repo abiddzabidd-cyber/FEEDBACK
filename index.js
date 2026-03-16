@@ -1,86 +1,131 @@
 require("dotenv").config();
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
-// Staff check
-function isStaff(userId) {
-  const OWNER = process.env.OWNER_ID;
-  const ADMIN = process.env.ADMIN_IDS.split(",");
-  const HELPER = process.env.HELPER_IDS.split(",");
-  return userId === OWNER || ADMIN.includes(userId) || HELPER.includes(userId);
-}
+const OWNER_IDS = process.env.OWNER_IDS.split(",");
+const ADMIN_IDS = process.env.ADMIN_IDS.split(",");
+const HELPER_IDS = process.env.HELPER_IDS.split(",");
+const FEEDBACK_CHANNEL_ID = process.env.FEEDBACK_CHANNEL_ID;
 
-// Feedback storage sementara di memory
-let feedbackList = []; // {id, userId, content, status}
+let feedbackCount = 0;
+let feedbacks = {}; // simpan sementara, bisa upgrade ke DB nanti
 
+// --- READY ---
 client.once("ready", () => {
   console.log(`Bot online sebagai ${client.user.tag}`);
 });
 
+// --- INTERACTION ---
 client.on("interactionCreate", async interaction => {
-  if(!interaction.isChatInputCommand()) return;
+  if (!interaction.isChatInputCommand()) return;
 
-  const feedbackChannel = client.channels.cache.get(process.env.FEEDBACK_CHANNEL_ID);
-  if(!feedbackChannel) return interaction.reply({ content: "❌ Channel feedback tidak ditemukan", ephemeral: true });
+  // --- FEEDBACK ---
+  if (interaction.commandName === "feedback") {
+    const saran = interaction.options.getString("saran");
 
-  if(interaction.commandName === "feedback") {
-    const content = interaction.options.getString("saran");
-    const fb = { id: feedbackList.length+1, userId: interaction.user.id, content, status: "pending" };
-    feedbackList.push(fb);
+    const feedbackChannel = await client.channels.fetch(FEEDBACK_CHANNEL_ID);
+    if (!feedbackChannel) return interaction.reply({ content: "Channel feedback tidak ditemukan", ephemeral: true });
 
-    // Tombol approve/reject cuma staff liat nanti
+    feedbackCount++;
+    feedbacks[feedbackCount] = {
+      userId: interaction.user.id,
+      saran,
+      status: "pending"
+    };
+
     const row = new ActionRowBuilder()
       .addComponents(
-        new ButtonBuilder().setCustomId(`approve_${fb.id}`).setLabel("Approve").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`reject_${fb.id}`).setLabel("Reject").setStyle(ButtonStyle.Danger)
+        new ButtonBuilder()
+          .setCustomId(`approve_${feedbackCount}`)
+          .setLabel("Approve")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`reject_${feedbackCount}`)
+          .setLabel("Reject")
+          .setStyle(ButtonStyle.Danger)
       );
 
-    await feedbackChannel.send({ content: `📩 Feedback #${fb.id} dari ${interaction.user.tag}: ${content}`, components: row.components });
-    await interaction.reply({ content: "✅ Feedback terkirim!", ephemeral: true });
+    await feedbackChannel.send({ 
+      content: `📩 Feedback #${feedbackCount} dari ${interaction.user.tag}: ${saran}`,
+      components: [row]
+    });
+
+    return interaction.reply({ content: "✅ Feedback terkirim!", ephemeral: true });
   }
 
-  if(interaction.commandName === "listfeedback") {
-    if(!isStaff(interaction.user.id)) return interaction.reply({ content: "❌ Kamu bukan staff", ephemeral: true });
-    const list = feedbackList.map(fb => `#${fb.id} | ${fb.status} | ${fb.content}`).join("\n") || "Belum ada feedback";
-    await interaction.reply({ content: `📋 Feedback list:\n${list}`, ephemeral: true });
+  // --- LISTFEEDBACK (staff only) ---
+  if (interaction.commandName === "listfeedback") {
+    const memberId = interaction.user.id;
+    if (![...OWNER_IDS, ...ADMIN_IDS, ...HELPER_IDS].includes(memberId)) {
+      return interaction.reply({ content: "❌ Kamu bukan staff", ephemeral: true });
+    }
+
+    let list = Object.entries(feedbacks).map(([id, fb]) => {
+      return `#${id} dari <@${fb.userId}>: ${fb.saran} (${fb.status})`;
+    }).join("\n") || "Tidak ada feedback";
+
+    return interaction.reply({ content: `📋 Daftar feedback:\n${list}`, ephemeral: true });
   }
 });
 
+// --- BUTTON ---
 client.on("interactionCreate", async interaction => {
-  if(!interaction.isButton()) return;
+  if (!interaction.isButton()) return;
+
+  const memberId = interaction.user.id;
+  if (![...OWNER_IDS, ...ADMIN_IDS, ...HELPER_IDS].includes(memberId)) {
+    return interaction.reply({ content: "❌ Kamu bukan staff", ephemeral: true });
+  }
 
   const [action, id] = interaction.customId.split("_");
-  const fb = feedbackList.find(f => f.id == id);
-  if(!fb) return;
+  const fb = feedbacks[id];
+  if (!fb) return interaction.reply({ content: "Feedback tidak ditemukan", ephemeral: true });
+  if (fb.status !== "pending") return interaction.reply({ content: "Feedback sudah di proses", ephemeral: true });
 
-  if(!isStaff(interaction.user.id)) return interaction.reply({ content: "❌ Kamu bukan staff", ephemeral: true });
+  const user = await client.users.fetch(fb.userId);
 
-  if(action === "approve") {
+  if (action === "approve") {
     fb.status = "approved";
-    await interaction.update({ content: `✅ Feedback #${fb.id} disetujui\n${fb.content}`, components: [] });
-    try { await client.users.cache.get(fb.userId).send(`✅ Feedback kamu disetujui oleh staff`); } catch {}
-  } else if(action === "reject") {
+    await interaction.update({ content: `✅ Feedback #${id} disetujui oleh ${interaction.user.tag}: ${fb.saran}`, components: [] });
+    await user.send(`✅ Feedbackmu disetujui! Terima kasih.`);
+  } else if (action === "reject") {
     fb.status = "rejected";
-    await interaction.update({ content: `❌ Feedback #${fb.id} ditolak\n${fb.content}`, components: [] });
-    try { await client.users.cache.get(fb.userId).send(`❌ Feedback kamu ditolak oleh staff`); } catch {}
+    await interaction.update({ content: `❌ Feedback #${id} ditolak oleh ${interaction.user.tag}: ${fb.saran}`, components: [] });
+    await user.send(`❌ Feedbackmu ditolak: Tidak sesuai aturan.`);
   }
 });
 
-// Slash commands
+// --- SLASH COMMAND REGISTER ---
 const commands = [
-  new SlashCommandBuilder().setName("feedback").setDescription("Kirim feedback").addStringOption(o=>o.setName("saran").setDescription("Saran kamu").setRequired(true)),
-  new SlashCommandBuilder().setName("listfeedback").setDescription("Lihat semua feedback (staff)")
+  new SlashCommandBuilder()
+    .setName("feedback")
+    .setDescription("Kirim feedback")
+    .addStringOption(opt => opt.setName("saran").setDescription("Masukkan saran/feedback").setRequired(true)),
+  
+  new SlashCommandBuilder()
+    .setName("listfeedback")
+    .setDescription("Lihat semua feedback (staff only)")
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
+
 (async () => {
   try {
-    await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID), { body: commands });
+    await rest.put(
+      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+      { body: commands }
+    );
     console.log("Slash command berhasil dibuat");
-  } catch(err) { console.error(err); }
+  } catch (err) {
+    console.error(err);
+  }
 })();
 
 client.login(process.env.TOKEN);
