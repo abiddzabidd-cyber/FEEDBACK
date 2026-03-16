@@ -1,12 +1,16 @@
 {
   "name": "feedback-bot",
   "version": "1.0.0",
+  "description": "Bot Discord untuk feedback dengan approve/reject",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "author": "Abid",
+  "license": "MIT",
   "dependencies": {
-    "discord.js": "^14.12.1",
-    "dotenv": "^16.3.1"
+    "discord.js": "^15.1.0",
+    "dotenv": "^16.3.1",
+    "fs": "0.0.1-security"
   }
 }
