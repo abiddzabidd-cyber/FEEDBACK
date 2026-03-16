@@ -1,185 +1,171 @@
-require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, SlashCommandBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, Events } = require('discord.js');
 const fs = require('fs');
-
-const TOKEN = process.env.TOKEN;
-const FEEDBACK_CHANNEL_ID = process.env.FEEDBACK_CHANNEL_ID;
-const OWNER_ID = process.env.OWNER_ID; // langsung pakai ID pribadi
-let ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',') : [];
-let HELPER_IDS = process.env.HELPER_IDS ? process.env.HELPER_IDS.split(',') : [];
-
-const FEEDBACK_FILE = './feedback.json';
-const STAFF_FILE = './staff.json';
+require('dotenv').config();
 
 const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
-    partials: [Partials.Channel],
+    partials: [Partials.Channel]
 });
 
-// Load feedback.json
-let feedbacks = fs.existsSync(FEEDBACK_FILE) ? JSON.parse(fs.readFileSync(FEEDBACK_FILE)) : [];
+// ===== CONFIG =====
+const OWNER_ID = process.env.OWNER_ID; 
+const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(",") : [];
+const HELPER_IDS = process.env.HELPER_IDS ? process.env.HELPER_IDS.split(",") : [];
+const FEEDBACK_CHANNEL_ID = process.env.FEEDBACK_CHANNEL_ID;
 
-// Load staff.json
-let staffData = fs.existsSync(STAFF_FILE) ? JSON.parse(fs.readFileSync(STAFF_FILE)) : { admins: ADMIN_IDS, helpers: HELPER_IDS };
+// ===== FILES =====
+const FEEDBACK_FILE = './feedback.json';
+const STAFF_FILE = './staff.json';
+if (!fs.existsSync(FEEDBACK_FILE)) fs.writeFileSync(FEEDBACK_FILE, '[]');
+if (!fs.existsSync(STAFF_FILE)) fs.writeFileSync(STAFF_FILE, JSON.stringify({ admins: [], helpers: [] }));
 
-function saveFeedbacks() {
-    fs.writeFileSync(FEEDBACK_FILE, JSON.stringify(feedbacks, null, 2));
+// ===== WARNA STATUS =====
+const STATUS_COLOR = {
+    pending: 0xFFD700,
+    approved: 0x00FF00,
+    rejected: 0xFF0000
+};
+
+// ===== UTILS =====
+function loadFeedback() { return JSON.parse(fs.readFileSync(FEEDBACK_FILE)); }
+function saveFeedback(data) { fs.writeFileSync(FEEDBACK_FILE, JSON.stringify(data, null, 2)); }
+function loadStaff() { return JSON.parse(fs.readFileSync(STAFF_FILE)); }
+function saveStaff(data) { fs.writeFileSync(STAFF_FILE, JSON.stringify(data, null, 2)); }
+function isStaff(userId) {
+    const staff = loadStaff();
+    return ADMIN_IDS.includes(userId) || HELPER_IDS.includes(userId) || staff.admins.includes(userId) || staff.helpers.includes(userId) || userId === OWNER_ID;
 }
 
-function saveStaff() {
-    fs.writeFileSync(STAFF_FILE, JSON.stringify(staffData, null, 2));
-}
-
-// Cek apakah member staff
-function isStaff(member) {
-    return member.id === OWNER_ID || staffData.admins.includes(member.id) || staffData.helpers.includes(member.id);
-}
-
-function statusEmoji(status) {
-    switch(status) {
-        case 'pending': return '🟨';
-        case 'approved': return '🟩';
-        case 'rejected': return '🟥';
-        default: return '❔';
-    }
-}
-
-client.once('ready', async () => {
+// ===== BOT READY =====
+client.once(Events.ClientReady, () => {
     console.log(`Bot online sebagai ${client.user.tag}`);
-
-    // Daftarin slash commands
-    const commands = [
-        new SlashCommandBuilder().setName('feedback').setDescription('Kirim saran/feedback')
-            .addStringOption(opt => opt.setName('saran').setDescription('Isi saran').setRequired(true)),
-        new SlashCommandBuilder().setName('listfeedback').setDescription('Lihat semua feedback (staff only)'),
-        new SlashCommandBuilder().setName('addstaff').setDescription('Tambah admin/helper (owner only)')
-            .addStringOption(opt => opt.setName('role').setDescription('admin/helper').setRequired(true))
-            .addUserOption(opt => opt.setName('user').setDescription('User yang mau ditambah').setRequired(true)),
-        new SlashCommandBuilder().setName('removestaff').setDescription('Hapus admin/helper (owner only)')
-            .addUserOption(opt => opt.setName('user').setDescription('User yang mau dihapus').setRequired(true))
-    ];
-    await client.application.commands.set(commands);
 });
 
-client.on('interactionCreate', async interaction => {
-    if (!interaction.isChatInputCommand() && !interaction.isButton() && !interaction.isModalSubmit()) return;
+// ===== COMMANDS =====
+client.on(Events.InteractionCreate, async interaction => {
+    if (interaction.isChatInputCommand()) {
+        const { commandName, user, options } = interaction;
 
-    // --------------------- FEEDBACK ---------------------
-    if (interaction.isChatInputCommand() && interaction.commandName === 'feedback') {
-        const saran = interaction.options.getString('saran');
-        const id = feedbacks.length + 1;
-        const feedbackData = {
-            id,
-            member: interaction.user.username,
-            feedback: saran,
-            status: 'pending',
-            reason: ''
-        };
-        feedbacks.push(feedbackData);
-        saveFeedbacks();
+        if (commandName === 'feedback') {
+            const saran = options.getString('saran');
+            const feedbackChannel = await client.channels.fetch(FEEDBACK_CHANNEL_ID);
+            if (!feedbackChannel) return interaction.reply({ content: 'Channel feedback tidak ditemukan!', ephemeral: true });
 
-        const channel = await client.channels.fetch(FEEDBACK_CHANNEL_ID);
-        const row = new ActionRowBuilder()
-            .addComponents(
-                new ButtonBuilder()
-                    .setCustomId(`approve_${id}`)
-                    .setLabel('Approve')
-                    .setStyle(ButtonStyle.Success),
-                new ButtonBuilder()
-                    .setCustomId(`reject_${id}`)
-                    .setLabel('Reject')
-                    .setStyle(ButtonStyle.Danger)
-            );
+            const feedbackData = loadFeedback();
+            const newFeedback = {
+                id: feedbackData.length + 1,
+                member: user.username,
+                memberId: user.id,
+                feedback: saran,
+                status: 'pending',
+                reason: ''
+            };
+            feedbackData.push(newFeedback);
+            saveFeedback(feedbackData);
 
-        await channel.send({ content: `📩 Feedback #${id} dari ${interaction.user.username}: ${saran} ${statusEmoji('pending')}`, components: [row] });
-        await interaction.reply({ content: 'Feedback berhasil dikirim!', ephemeral: true });
-    }
+            const row = new ActionRowBuilder()
+                .addComponents(
+                    new ButtonBuilder()
+                        .setCustomId(`approve_${newFeedback.id}`)
+                        .setLabel('Approve')
+                        .setStyle(ButtonStyle.Success),
+                    new ButtonBuilder()
+                        .setCustomId(`reject_${newFeedback.id}`)
+                        .setLabel('Reject')
+                        .setStyle(ButtonStyle.Danger)
+                );
 
-    // --------------------- LIST FEEDBACK ---------------------
-    if (interaction.isChatInputCommand() && interaction.commandName === 'listfeedback') {
-        if (!isStaff(interaction.member)) return interaction.reply({ content: 'Kamu bukan staff!', ephemeral: true });
-        let list = feedbacks.map(f => `#${f.id} ${f.member}: ${f.feedback} ${statusEmoji(f.status)}`).join('\n');
-        if (!list) list = 'Belum ada feedback';
-        await interaction.reply({ content: list, ephemeral: true });
-    }
-
-    // --------------------- ADD STAFF ---------------------
-    if (interaction.isChatInputCommand() && interaction.commandName === 'addstaff') {
-        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: 'Hanya owner yang bisa menambah staff!', ephemeral: true });
-        const role = interaction.options.getString('role').toLowerCase();
-        const user = interaction.options.getUser('user');
-
-        if (role === 'admin') {
-            if (!staffData.admins.includes(user.id)) staffData.admins.push(user.id);
-        } else if (role === 'helper') {
-            if (!staffData.helpers.includes(user.id)) staffData.helpers.push(user.id);
-        } else return interaction.reply({ content: 'Role harus admin atau helper!', ephemeral: true });
-
-        saveStaff();
-        await interaction.reply({ content: `${user.username} berhasil ditambahkan sebagai ${role}`, ephemeral: true });
-    }
-
-    // --------------------- REMOVE STAFF ---------------------
-    if (interaction.isChatInputCommand() && interaction.commandName === 'removestaff') {
-        if (interaction.user.id !== OWNER_ID) return interaction.reply({ content: 'Hanya owner yang bisa menghapus staff!', ephemeral: true });
-        const user = interaction.options.getUser('user');
-
-        staffData.admins = staffData.admins.filter(id => id !== user.id);
-        staffData.helpers = staffData.helpers.filter(id => id !== user.id);
-        saveStaff();
-
-        await interaction.reply({ content: `${user.username} berhasil dihapus dari staff`, ephemeral: true });
-    }
-
-    // --------------------- BUTTON APPROVE/REJECT ---------------------
-    if (interaction.isButton()) {
-        if (!isStaff(interaction.member)) return interaction.reply({ content: 'Kamu bukan staff!', ephemeral: true });
-
-        const [action, fid] = interaction.customId.split('_');
-        const feedback = feedbacks.find(f => f.id == fid);
-        if (!feedback) return interaction.reply({ content: 'Feedback tidak ditemukan!', ephemeral: true });
-
-        const modal = new ModalBuilder()
-            .setCustomId(`modal_${action}_${fid}`)
-            .setTitle(`${action.toUpperCase()} Feedback #${fid}`)
-            .addComponents(
-                new ActionRowBuilder().addComponents(
-                    new TextInputBuilder()
-                        .setCustomId('reason')
-                        .setLabel('Alasan')
-                        .setStyle(TextInputStyle.Paragraph)
-                        .setRequired(true)
+            const embed = new EmbedBuilder()
+                .setTitle(`📩 Feedback #${newFeedback.id}`)
+                .setDescription(`${user.username}: ${saran}`)
+                .setColor(STATUS_COLOR.pending)
+                .addFields(
+                    { name: 'Status', value: 'PENDING', inline: true },
+                    { name: 'Alasan', value: 'Belum diisi', inline: true }
                 )
-            );
-        await interaction.showModal(modal);
-    }
+                .setTimestamp();
 
-    // --------------------- MODAL SUBMIT ---------------------
-    if (interaction.isModalSubmit()) {
-        const [prefix, action, fid] = interaction.customId.split('_');
-        const reason = interaction.fields.getTextInputValue('reason');
-        const feedback = feedbacks.find(f => f.id == fid);
-        if (!feedback) return interaction.reply({ content: 'Feedback tidak ditemukan!', ephemeral: true });
-
-        feedback.status = action === 'approve' ? 'approved' : 'rejected';
-        feedback.reason = reason;
-        saveFeedbacks();
-
-        const channel = await client.channels.fetch(FEEDBACK_CHANNEL_ID);
-        const messages = await channel.messages.fetch({ limit: 100 });
-        const msg = messages.find(m => m.content.includes(`Feedback #${fid} dari`));
-        if (msg) {
-            await msg.edit({ content: `📩 Feedback #${fid} dari ${feedback.member}: ${feedback.feedback} ${statusEmoji(feedback.status)}\nKARENA: ${feedback.reason}`, components: [] });
+            await feedbackChannel.send({ embeds: [embed], components: [row] });
+            interaction.reply({ content: 'Feedback berhasil dikirim!', ephemeral: true });
         }
 
-        // DM member
-        try {
-            const user = await client.users.fetch(interaction.user.id);
-            await user.send(`Feedback kamu #${fid} telah ${feedback.status.toUpperCase()}.\nAlasan: ${feedback.reason}`);
-        } catch {}
+        if (commandName === 'listfeedback') {
+            if (!isStaff(user.id)) return interaction.reply({ content: 'Kamu bukan staff!', ephemeral: true });
 
-        await interaction.reply({ content: `Feedback #${fid} telah ${feedback.status.toUpperCase()}`, ephemeral: true });
+            const feedbackData = loadFeedback();
+            if (feedbackData.length === 0) return interaction.reply({ content: 'Belum ada feedback!', ephemeral: true });
+
+            let listText = '';
+            feedbackData.forEach(fb => {
+                listText += `#${fb.id} | ${fb.member} | Status: ${fb.status.toUpperCase()} | ${fb.reason || '-'}\n`;
+            });
+            interaction.reply({ content: listText, ephemeral: true });
+        }
+    }
+
+    // BUTTON CLICK
+    if (interaction.isButton()) {
+        const [action, id] = interaction.customId.split('_');
+        const feedbackData = loadFeedback();
+        const fb = feedbackData.find(f => f.id == id);
+        if (!fb) return interaction.reply({ content: 'Feedback tidak ditemukan!', ephemeral: true });
+
+        if (!isStaff(interaction.user.id)) return interaction.reply({ content: 'Kamu bukan staff!', ephemeral: true });
+
+        if (action === 'approve' || action === 'reject') {
+            await interaction.showModal({
+                custom_id: `${action}_modal_${id}`,
+                title: action === 'approve' ? 'Approve Feedback' : 'Reject Feedback',
+                components: [
+                    {
+                        type: 1,
+                        components: [
+                            {
+                                type: 4,
+                                custom_id: 'reason',
+                                style: 2,
+                                label: 'Alasan',
+                                placeholder: 'Isi alasan disetujui / ditolak',
+                                required: true
+                            }
+                        ]
+                    }
+                ]
+            });
+        }
+    }
+
+    // MODAL SUBMIT
+    if (interaction.isModalSubmit()) {
+        const [action, , id] = interaction.customId.split('_');
+        const reason = interaction.fields.getTextInputValue('reason');
+
+        const feedbackData = loadFeedback();
+        const fb = feedbackData.find(f => f.id == id);
+        if (!fb) return interaction.reply({ content: 'Feedback tidak ditemukan!', ephemeral: true });
+
+        fb.status = action === 'approve' ? 'approved' : 'rejected';
+        fb.reason = reason;
+        saveFeedback(feedbackData);
+
+        const feedbackChannel = await client.channels.fetch(FEEDBACK_CHANNEL_ID);
+        const messages = await feedbackChannel.messages.fetch({ limit: 50 });
+        const msg = messages.find(m => m.embeds[0]?.title?.includes(`#${id}`));
+        if (msg) {
+            const embed = EmbedBuilder.from(msg.embeds[0])
+                .setColor(STATUS_COLOR[fb.status])
+                .spliceFields(0, 2, 
+                    { name: 'Status', value: fb.status.toUpperCase(), inline: true },
+                    { name: 'Alasan', value: fb.reason || '-', inline: true }
+                );
+            msg.edit({ embeds: [embed], components: [] });
+        }
+
+        const member = await client.users.fetch(fb.memberId);
+        member.send(`Feedbackmu (#${fb.id}) telah ${fb.status.toUpperCase()}.\nAlasan: ${fb.reason}`);
+
+        interaction.reply({ content: `Feedback #${id} berhasil ${fb.status.toUpperCase()}!`, ephemeral: true });
     }
 });
 
-client.login(TOKEN);
+client.login(process.env.TOKEN);
