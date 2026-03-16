@@ -1,136 +1,153 @@
+// index.js
+const { Client, GatewayIntentBits, SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, InteractionType } = require("discord.js");
+const fs = require("fs");
 require("dotenv").config();
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField } = require("discord.js");
 
-// ====== CLIENT ======
+// Inisialisasi client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
+    GatewayIntentBits.MessageContent
+  ]
 });
 
-// ====== ENV VARIABLES ======
-const OWNER_ID = process.env.OWNER_ID; // satu owner aja
-const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(",") : [];
-const HELPER_IDS = process.env.HELPER_IDS ? process.env.HELPER_IDS.split(",") : [];
-const FEEDBACK_CHANNEL_ID = process.env.FEEDBACK_CHANNEL_ID; // channel tempat feedback masuk
-
-// ====== FEEDBACK STORAGE ======
-let feedbackCount = 0;
-let feedbacks = {}; // { id: { userId, content, status } }
-
-// ====== UTILS ======
-function isStaff(userId) {
-  return userId === OWNER_ID || ADMIN_IDS.includes(userId) || HELPER_IDS.includes(userId);
+// Load admin/helper list
+let adminData = { admins: [] };
+if(fs.existsSync("admin.json")){
+  adminData = JSON.parse(fs.readFileSync("admin.json"));
 }
 
-// ====== READY ======
-client.once("ready", () => {
+// Cek staff (owner + admin/helper)
+function isStaff(userId) {
+  return userId === process.env.OWNER_ID || adminData.admins.includes(userId);
+}
+
+client.once("ready", async () => {
   console.log(`Bot online sebagai ${client.user.tag}`);
-});
 
-// ====== MESSAGE/INTERACTION HANDLER ======
-client.on("interactionCreate", async (interaction) => {
-  if (interaction.isChatInputCommand()) {
-    const { commandName, user, options } = interaction;
-
-    // ====== FEEDBACK ======
-    if (commandName === "feedback") {
-      const content = options.getString("saran");
-      feedbackCount++;
-      const id = feedbackCount;
-
-      feedbacks[id] = { userId: user.id, content, status: "pending" };
-
-      const channel = await client.channels.fetch(FEEDBACK_CHANNEL_ID).catch(() => null);
-      if (!channel)
-        return interaction.reply({ content: "⚠️ Channel feedback tidak ditemukan", ephemeral: true });
-
-      // Row tombol approve/reject hanya staff bisa klik
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`approve_${id}`)
-          .setLabel("Approve")
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId(`reject_${id}`)
-          .setLabel("Reject")
-          .setStyle(ButtonStyle.Danger)
-      );
-
-      await channel.send({
-        content: `📩 Feedback #${id} dari <@${user.id}>: ${content}`,
-        components: [row],
-      });
-
-      await interaction.reply({ content: "✅ Feedback berhasil dikirim", ephemeral: true });
-    }
-
-    // ====== LIST FEEDBACK (staff only) ======
-    if (commandName === "listfeedback") {
-      if (!isStaff(user.id))
-        return interaction.reply({ content: "⚠️ Kamu bukan staff", ephemeral: true });
-
-      let list = Object.entries(feedbacks)
-        .map(([id, f]) => `#${id} | <@${f.userId}> | ${f.content} | ${f.status}`)
-        .join("\n") || "Belum ada feedback";
-
-      interaction.reply({ content: list, ephemeral: true });
-    }
-  }
-
-  // ====== BUTTON HANDLER ======
-  if (interaction.isButton()) {
-    const [action, fid] = interaction.customId.split("_");
-    const feedback = feedbacks[fid];
-    if (!feedback) return;
-
-    // hanya staff bisa klik
-    if (!isStaff(interaction.user.id))
-      return interaction.reply({ content: "⚠️ Kamu bukan staff", ephemeral: true });
-
-    const userObj = await client.users.fetch(feedback.userId).catch(() => null);
-
-    if (action === "approve") {
-      feedback.status = "approved";
-      await interaction.update({ content: `✅ Feedback #${fid} disetujui`, components: [] });
-      if (userObj)
-        userObj.send(`✅ Feedback kamu disetujui: "${feedback.content}"`).catch(() => {});
-    } else if (action === "reject") {
-      feedback.status = "rejected";
-      await interaction.update({ content: `❌ Feedback #${fid} ditolak`, components: [] });
-      if (userObj)
-        userObj
-          .send(`❌ Feedback kamu ditolak: "${feedback.content}"\nAlasan: Silakan perbaiki`)
-          .catch(() => {});
-    }
-  }
-});
-
-// ====== SLASH COMMANDS REGISTER ======
-const commands = [
-  new SlashCommandBuilder()
+  // Slash command
+  const feedbackCommand = new SlashCommandBuilder()
     .setName("feedback")
-    .setDescription("Kirim saran/feedback")
-    .addStringOption((o) => o.setName("saran").setDescription("Isi feedback").setRequired(true)),
-  new SlashCommandBuilder()
-    .setName("listfeedback")
-    .setDescription("Lihat semua feedback (staff only)"),
-].map((c) => c.toJSON());
+    .setDescription("Kirim saran atau feedback")
+    .addStringOption(option => 
+      option.setName("saran")
+        .setDescription("Isi feedback kamu")
+        .setRequired(true)
+    );
 
-const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
+  const addAdminCommand = new SlashCommandBuilder()
+    .setName("addadmin")
+    .setDescription("Owner bisa add admin/helper")
+    .addUserOption(option =>
+      option.setName("user")
+        .setDescription("User yg mau dijadikan admin/helper")
+        .setRequired(true)
+    );
 
-(async () => {
-  try {
-    await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID), {
-      body: commands,
+  const removeAdminCommand = new SlashCommandBuilder()
+    .setName("removeadmin")
+    .setDescription("Owner bisa remove admin/helper")
+    .addUserOption(option =>
+      option.setName("user")
+        .setDescription("User yg mau dihapus dari admin/helper")
+        .setRequired(true)
+    );
+
+  await client.application.commands.set([feedbackCommand, addAdminCommand, removeAdminCommand]);
+  console.log("Slash command berhasil dibuat");
+});
+
+// Handle slash command
+client.on("interactionCreate", async interaction => {
+  if(interaction.type !== InteractionType.ApplicationCommand) return;
+
+  const userId = interaction.user.id;
+  const feedbackChannel = await client.channels.fetch(process.env.FEEDBACK_CHANNEL_ID);
+
+  // Feedback
+  if(interaction.commandName === "feedback"){
+    const saran = interaction.options.getString("saran");
+
+    const feedbackEmbed = new EmbedBuilder()
+      .setColor("Yellow")
+      .setTitle("📩 Feedback Baru")
+      .setDescription(`**Dari:** ${interaction.user.tag}\n**Saran:** ${saran}\n**Status:** Pending`);
+
+    const approveBtn = new ButtonBuilder()
+      .setCustomId("approve")
+      .setLabel("Approve")
+      .setStyle(ButtonStyle.Success);
+
+    const rejectBtn = new ButtonBuilder()
+      .setCustomId("reject")
+      .setLabel("Reject")
+      .setStyle(ButtonStyle.Danger);
+
+    const row = new ActionRowBuilder().addComponents(approveBtn, rejectBtn);
+
+    await feedbackChannel.send({
+      embeds: [feedbackEmbed],
+      components: isStaff(userId) ? [row] : []
     });
-    console.log("Slash command berhasil dibuat");
-  } catch (err) {
-    console.error(err);
-  }
-})();
 
-// ====== LOGIN ======
+    await interaction.reply({ content: "✅ Feedback terkirim!", ephemeral: true });
+  }
+
+  // Add admin
+  if(interaction.commandName === "addadmin"){
+    if(userId !== process.env.OWNER_ID) return interaction.reply({ content: "❌ Hanya owner yg bisa add admin", ephemeral: true });
+
+    const newAdminId = interaction.options.getUser("user").id;
+    if(!adminData.admins.includes(newAdminId)){
+      adminData.admins.push(newAdminId);
+      fs.writeFileSync("admin.json", JSON.stringify(adminData, null, 2));
+      return interaction.reply({ content: `✅ User ${newAdminId} sekarang admin/helper` });
+    } else {
+      return interaction.reply({ content: "⚠️ User ini sudah admin/helper" });
+    }
+  }
+
+  // Remove admin
+  if(interaction.commandName === "removeadmin"){
+    if(userId !== process.env.OWNER_ID) return interaction.reply({ content: "❌ Hanya owner yg bisa remove admin", ephemeral: true });
+
+    const adminId = interaction.options.getUser("user").id;
+    adminData.admins = adminData.admins.filter(id => id !== adminId);
+    fs.writeFileSync("admin.json", JSON.stringify(adminData, null, 2));
+    return interaction.reply({ content: `🗑 User ${adminId} bukan admin/helper lagi` });
+  }
+});
+
+// Tombol approve/reject
+client.on("interactionCreate", async interaction => {
+  if(!interaction.isButton()) return;
+
+  const userId = interaction.user.id;
+  if(!isStaff(userId)) return interaction.reply({ content: "❌ Kamu bukan staff", ephemeral: true });
+
+  const msg = interaction.message;
+  const embed = EmbedBuilder.from(msg.embeds[0]);
+  const memberTag = embed.data.description.split("\n")[0].replace("**Dari:** ", "");
+
+  if(interaction.customId === "approve"){
+    embed.setColor("Green");
+    embed.setFooter({ text: "Disetujui ✅" });
+    await msg.edit({ embeds: [embed], components: [] });
+    await interaction.reply({ content: "✅ Feedback disetujui", ephemeral: true });
+    const member = await client.users.fetch(memberTag.replace(/<@!?(\d+)>/, "$1")).catch(()=>null);
+    if(member) member.send("✅ Feedback kamu telah disetujui oleh staff!");
+  }
+
+  if(interaction.customId === "reject"){
+    embed.setColor("Red");
+    embed.setFooter({ text: "Ditolak ❌" });
+    await msg.edit({ embeds: [embed], components: [] });
+    await interaction.reply({ content: "❌ Feedback ditolak", ephemeral: true });
+    const member = await client.users.fetch(memberTag.replace(/<@!?(\d+)>/, "$1")).catch(()=>null);
+    if(member) member.send("❌ Feedback kamu telah ditolak oleh staff!");
+  }
+});
+
+// Login
 client.login(process.env.TOKEN);
